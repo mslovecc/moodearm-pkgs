@@ -16,8 +16,11 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.package }}
+    name: Build ${{ matrix.package }} (Debian Trixie)
     runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:trixie-slim
+      options: --platform linux/arm64
     strategy:
       fail-fast: false
       matrix:
@@ -30,44 +33,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- 克隆 moOde 官方 pkgbuild 仓库 ----------
       - name: Clone mslovecc/pkgbuild
         run: git clone --depth 1 https://github.com/mslovecc/pkgbuild.git pkgbuild
 
-      # ---------- 通用构建工具 ----------
-      - name: Install base build tools
+      # ---------- 在 Debian Trixie 容器内安装通用工具 ----------
+      - name: Install base build tools (Trixie)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
             build-essential fakeroot debhelper dh-make devscripts \
-            pkg-config git wget curl ca-certificates file
+            pkg-config git wget curl ca-certificates file \
+            dpkg-dev gcc g++ make libtool autoconf automake
 
-      # ---------- 各包依赖 ----------
-      - name: Install nqptp dependencies
+      # ---------- 各包依赖 (Trixie 环境) ----------
+      - name: Install nqptp dependencies (Trixie)
         if: matrix.package == 'nqptp'
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             autoconf automake libtool
 
-      - name: Install shairport-sync dependencies
+      - name: Install shairport-sync dependencies (Trixie)
         if: matrix.package == 'shairport-sync'
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             autoconf automake libtool xxd \
             libdaemon-dev libasound2-dev libpopt-dev libconfig-dev \
             libssl-dev libavahi-client-dev libsoxr-dev libplist-dev \
             libsodium-dev libavutil-dev libavcodec-dev libavformat-dev \
             uuid-dev libgcrypt-dev libmosquitto-dev
 
-      - name: Install librespot dependencies
+      - name: Install librespot dependencies (Trixie)
         if: matrix.package == 'librespot'
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libpulse-dev \
             libavahi-client-dev libssl-dev
+          # 在容器内安装 Rust 工具链
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- -y --profile minimal --default-toolchain stable
-          source "$HOME/.cargo/env"
+          . "$HOME/.cargo/env"
           cargo install cargo-deb --locked
 
       # ---------- 准备 pkgbuild 环境 ----------
@@ -75,24 +79,16 @@ jobs:
         run: |
           set -eux
           cd pkgbuild
-
-          echo "===== scripts/ 目录 ====="
           ls -la scripts/
-
-          # 生成 setenv.sh（若不存在）
           if [ -f scripts/setenv.sh.example ] && [ ! -f scripts/setenv.sh ]; then
             cp scripts/setenv.sh.example scripts/setenv.sh
           fi
-          # 若仓库根目录也有 setenv.sh.example，一并处理
           if [ -f setenv.sh.example ] && [ ! -f setenv.sh ]; then
             cp setenv.sh.example setenv.sh
           fi
-
-          # 打印 setenv.sh 内容，方便排查
           echo "===== setenv.sh 内容 ====="
           [ -f scripts/setenv.sh ] && cat scripts/setenv.sh || true
           [ -f setenv.sh ] && cat setenv.sh || true
-
           chmod +x scripts/*.sh 2>/dev/null || true
           chmod +x packages/${{ matrix.package }}/build.sh
           ls -la packages/${{ matrix.package }}/
@@ -102,33 +98,21 @@ jobs:
         run: |
           set -eux
           cd pkgbuild
-
-          # source 公共函数库与环境变量
-          [ -f scripts/setenv.sh ] && source scripts/setenv.sh || true
-          [ -f setenv.sh ] && source setenv.sh || true
-
-          # 让 build.sh 能找到 scripts/ 下的辅助脚本
+          [ -f scripts/setenv.sh ] && . scripts/setenv.sh || true
+          [ -f setenv.sh ] && . setenv.sh || true
           export PATH="$PWD/scripts:$PATH"
-
           cd packages/${{ matrix.package }}
           ./build.sh
 
-      # ---------- 收集 deb 产物 ----------
+      # ---------- 收集产物 ----------
       - name: Collect deb artifacts
         run: |
           set -eux
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-
-          echo "===== 搜索所有 .deb 文件 ====="
           find "$GITHUB_WORKSPACE/pkgbuild" -type f -name "*.deb" -exec ls -lh {} \;
-
-          # 复制所有 deb 到 artifacts/
           find "$GITHUB_WORKSPACE/pkgbuild" -type f -name "*.deb" \
             -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
-
-          echo "===== artifacts/ 内容 ====="
           ls -lh "$GITHUB_WORKSPACE/artifacts/"
-
           if [ -z "$(ls -A "$GITHUB_WORKSPACE/artifacts")" ]; then
             echo "ERROR: 未找到任何 .deb 产物" >&2
             exit 1
