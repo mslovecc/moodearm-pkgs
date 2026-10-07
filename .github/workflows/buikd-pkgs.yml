@@ -1,0 +1,146 @@
+name: Build and Release moOde ARM64 Deb Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: false
+        default: 'latest'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }}
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: nqptp
+          - package: shairport-sync
+          - package: librespot
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------- 克隆 moOde 官方 pkgbuild 仓库 ----------
+      - name: Clone mslovecc/pkgbuild
+        run: |
+          git clone --depth 1 https://github.com/mslovecc/pkgbuild.git pkgbuild
+
+      # ---------- 安装通用构建工具 ----------
+      - name: Install base build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential fakeroot debhelper dh-make devscripts \
+            pkg-config git wget curl ca-certificates
+
+      # ---------- 各包依赖安装 ----------
+      - name: Install nqptp dependencies
+        if: matrix.package == 'nqptp'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool
+
+      - name: Install shairport-sync dependencies
+        if: matrix.package == 'shairport-sync'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool xxd \
+            libdaemon-dev libasound2-dev libpopt-dev libconfig-dev \
+            libssl-dev libavahi-client-dev libsoxr-dev libplist-dev \
+            libsodium-dev libavutil-dev libavcodec-dev libavformat-dev \
+            uuid-dev libgcrypt-dev libmosquitto-dev
+
+      - name: Install librespot dependencies
+        if: matrix.package == 'librespot'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libpulse-dev \
+            libavahi-client-dev libssl-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --profile minimal --default-toolchain stable
+          source "$HOME/.cargo/env"
+          cargo install cargo-deb --locked
+
+      # ---------- 使用 pkgbuild 脚本构建各包 ----------
+      - name: Build ${{ matrix.package }}
+        run: |
+          set -eux
+          cd pkgbuild/${{ matrix.package }}
+          # 如果脚本需要 source 环境变量，在此处 source
+          # source ../env.sh
+          chmod +x build.sh
+          ./build.sh
+
+      # ---------- 收集 deb 产物 ----------
+      - name: Collect deb artifacts
+        run: |
+          set -eux
+          mkdir -p artifacts
+          # 根据实际脚本的输出路径调整
+          find pkgbuild -name "*.deb" -path "*/binary/*" -exec cp {} artifacts/ \;
+          # 如果没有输出，尝试其他常见路径
+          if [ -z "$(ls -A artifacts)" ]; then
+            find pkgbuild -name "*.deb" -exec cp {} artifacts/ \;
+          fi
+          ls -lh artifacts/
+
+      - name: Verify architecture
+        run: |
+          set -eux
+          for deb in artifacts/*.deb; do
+            echo "=== $deb ==="
+            dpkg-deb --info "$deb" | grep -E 'Package|Version|Architecture'
+          done
+
+      - name: Upload ${{ matrix.package }} artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-deb
+          path: artifacts/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-debs
+
+      - name: List all deb files
+        run: |
+          set -eux
+          find all-debs -type f -name '*.deb' -exec ls -lh {} \;
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "moOde ARM64 Packages ${{ steps.tag.outputs.tag }}"
+          generate_release_notes: true
+          files: all-debs/**/*.deb
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
