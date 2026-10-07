@@ -34,26 +34,25 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. 基础工具 + 创建 sudo shim
+      # 1. 基础工具 + 真 sudo + equivs（mk-build-deps 需要）
       # ============================================================
-      - name: Bootstrap base tools and sudo shim
+      - name: Bootstrap base tools
         run: |
           set -eux
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
+            sudo equivs \
             git ca-certificates curl wget \
             build-essential fakeroot debhelper dh-make devscripts \
-            pkg-config file dpkg-dev gcc g++ make libtool autoconf automake \
-            libtool-bin libplist-utils
+            pkg-config file dpkg-dev gcc g++ make \
+            libtool libtool-bin autoconf automake \
+            swig pv python3-pip \
+            libplist-utils xxd
 
-          # 容器内已是 root，创建一个 sudo shim 让脚本里的 sudo 直接执行
-          cat > /usr/local/bin/sudo <<'SHIM'
-          #!/bin/sh
-          exec "$@"
-          SHIM
-          chmod +x /usr/local/bin/sudo
-          echo "sudo shim created:"
-          cat /usr/local/bin/sudo
+          # 验证 sudo 可用
+          sudo -E true
+          echo "sudo OK"
 
       # ============================================================
       # 2. 克隆 mslovecc/pkgbuild
@@ -61,32 +60,39 @@ jobs:
       - name: Clone mslovecc/pkgbuild
         run: |
           git clone --depth 1 https://github.com/mslovecc/pkgbuild.git pkgbuild
-          echo "===== packages/ ====="
           ls -la pkgbuild/packages/
-          echo "===== scripts/ ====="
           ls -la pkgbuild/scripts/
 
       # ============================================================
-      # 3. 各包额外依赖
+      # 3. 各包依赖 —— 一次性装齐，避免构建中途 apt
       # ============================================================
       - name: Install nqptp dependencies
         if: matrix.package == 'nqptp'
         run: |
-          apt-get install -y --no-install-recommends autoconf automake libtool libtool-bin
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y --no-install-recommends \
+            autoconf automake libtool libtool-bin
 
       - name: Install shairport-sync dependencies
         if: matrix.package == 'shairport-sync'
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get install -y --no-install-recommends \
-            autoconf automake libtool libtool-bin xxd \
+            autoconf automake libtool libtool-bin xxd swig pv \
             libdaemon-dev libasound2-dev libpopt-dev libconfig-dev \
-            libssl-dev libavahi-client-dev libsoxr-dev libplist-dev libplist-utils \
+            libssl-dev libavahi-client-dev libsoxr-dev \
+            libplist-dev libplist-utils \
             libsodium-dev libavutil-dev libavcodec-dev libavformat-dev \
-            uuid-dev libgcrypt-dev libmosquitto-dev
+            uuid-dev libgcrypt-dev libmosquitto-dev \
+            libjack-jackd2-dev libpipewire-0.3-dev libpulse-dev \
+            libsndfile1-dev xmltoman \
+            libglib2.0-dev libconfig++-dev \
+            libsystemd-dev
 
       - name: Install librespot dependencies
         if: matrix.package == 'librespot'
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libpulse-dev \
             libavahi-client-dev libssl-dev
@@ -112,8 +118,6 @@ jobs:
 
           echo "===== scripts/setenv.sh ====="
           [ -f scripts/setenv.sh ] && cat scripts/setenv.sh || echo "(不存在)"
-          echo "===== setenv.sh ====="
-          [ -f setenv.sh ] && cat setenv.sh || echo "(不存在)"
 
           chmod +x scripts/*.sh 2>/dev/null || true
           chmod +x packages/${{ matrix.package }}/build.sh
@@ -128,7 +132,7 @@ jobs:
           cd pkgbuild
           [ -f scripts/setenv.sh ] && . scripts/setenv.sh || true
           [ -f setenv.sh ] && . setenv.sh || true
-          export PATH="$PWD/scripts:/usr/local/bin:$PATH"
+          export PATH="$PWD/scripts:$PATH"
           cd packages/${{ matrix.package }}
           ./build.sh
 
@@ -165,7 +169,7 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # Release job
+  # Release
   # ============================================================
   release:
     name: Publish Release
