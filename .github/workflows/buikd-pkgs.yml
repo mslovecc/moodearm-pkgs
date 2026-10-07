@@ -14,6 +14,9 @@ on:
 permissions:
   contents: write
 
+env:
+  TERM: xterm
+
 jobs:
   build:
     name: Build ${{ matrix.package }} (Debian Trixie ARM64)
@@ -31,15 +34,26 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. 基础工具（trixie-slim 里没有 git，必须最先装）
+      # 1. 基础工具 + 创建 sudo shim
       # ============================================================
-      - name: Bootstrap base tools
+      - name: Bootstrap base tools and sudo shim
         run: |
+          set -eux
           apt-get update
           apt-get install -y --no-install-recommends \
             git ca-certificates curl wget \
             build-essential fakeroot debhelper dh-make devscripts \
-            pkg-config file dpkg-dev gcc g++ make libtool autoconf automake
+            pkg-config file dpkg-dev gcc g++ make libtool autoconf automake \
+            libtool-bin libplist-utils
+
+          # 容器内已是 root，创建一个 sudo shim 让脚本里的 sudo 直接执行
+          cat > /usr/local/bin/sudo <<'SHIM'
+          #!/bin/sh
+          exec "$@"
+          SHIM
+          chmod +x /usr/local/bin/sudo
+          echo "sudo shim created:"
+          cat /usr/local/bin/sudo
 
       # ============================================================
       # 2. 克隆 mslovecc/pkgbuild
@@ -47,11 +61,9 @@ jobs:
       - name: Clone mslovecc/pkgbuild
         run: |
           git clone --depth 1 https://github.com/mslovecc/pkgbuild.git pkgbuild
-          echo "===== pkgbuild 顶层结构 ====="
-          ls -la pkgbuild/
-          echo "===== packages/ 目录 ====="
+          echo "===== packages/ ====="
           ls -la pkgbuild/packages/
-          echo "===== scripts/ 目录 ====="
+          echo "===== scripts/ ====="
           ls -la pkgbuild/scripts/
 
       # ============================================================
@@ -60,16 +72,15 @@ jobs:
       - name: Install nqptp dependencies
         if: matrix.package == 'nqptp'
         run: |
-          apt-get install -y --no-install-recommends \
-            autoconf automake libtool
+          apt-get install -y --no-install-recommends autoconf automake libtool libtool-bin
 
       - name: Install shairport-sync dependencies
         if: matrix.package == 'shairport-sync'
         run: |
           apt-get install -y --no-install-recommends \
-            autoconf automake libtool xxd \
+            autoconf automake libtool libtool-bin xxd \
             libdaemon-dev libasound2-dev libpopt-dev libconfig-dev \
-            libssl-dev libavahi-client-dev libsoxr-dev libplist-dev \
+            libssl-dev libavahi-client-dev libsoxr-dev libplist-dev libplist-utils \
             libsodium-dev libavutil-dev libavcodec-dev libavformat-dev \
             uuid-dev libgcrypt-dev libmosquitto-dev
 
@@ -85,75 +96,58 @@ jobs:
           cargo install cargo-deb --locked
 
       # ============================================================
-      # 4. 准备 pkgbuild 环境（生成 setenv.sh 并打印内容）
+      # 4. 准备 pkgbuild 环境
       # ============================================================
       - name: Prepare pkgbuild environment
         run: |
           set -eux
           cd pkgbuild
 
-          # 生成 scripts/setenv.sh
           if [ -f scripts/setenv.sh.example ] && [ ! -f scripts/setenv.sh ]; then
             cp scripts/setenv.sh.example scripts/setenv.sh
           fi
-          # 生成根目录 setenv.sh
           if [ -f setenv.sh.example ] && [ ! -f setenv.sh ]; then
             cp setenv.sh.example setenv.sh
           fi
 
-          echo "===== scripts/setenv.sh 内容 ====="
+          echo "===== scripts/setenv.sh ====="
           [ -f scripts/setenv.sh ] && cat scripts/setenv.sh || echo "(不存在)"
-          echo "===== setenv.sh 内容 ====="
+          echo "===== setenv.sh ====="
           [ -f setenv.sh ] && cat setenv.sh || echo "(不存在)"
 
           chmod +x scripts/*.sh 2>/dev/null || true
           chmod +x packages/${{ matrix.package }}/build.sh
-          echo "===== packages/${{ matrix.package }}/ 内容 ====="
           ls -la packages/${{ matrix.package }}/
 
       # ============================================================
-      # 5. 执行构建
+      # 5. 构建
       # ============================================================
       - name: Build ${{ matrix.package }}
         run: |
           set -eux
           cd pkgbuild
-
-          # 加载环境变量
           [ -f scripts/setenv.sh ] && . scripts/setenv.sh || true
           [ -f setenv.sh ] && . setenv.sh || true
-
-          # 让 build.sh 能直接调用 scripts/ 下的辅助脚本
-          export PATH="$PWD/scripts:$PATH"
-
+          export PATH="$PWD/scripts:/usr/local/bin:$PATH"
           cd packages/${{ matrix.package }}
           ./build.sh
 
       # ============================================================
-      # 6. 收集 deb 产物
+      # 6. 收集产物
       # ============================================================
       - name: Collect deb artifacts
         run: |
           set -eux
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-
-          echo "===== 搜索所有 .deb 文件 ====="
           find "$GITHUB_WORKSPACE/pkgbuild" -type f -name "*.deb" -exec ls -lh {} \;
-
           find "$GITHUB_WORKSPACE/pkgbuild" -type f -name "*.deb" \
             -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
-
-          echo "===== artifacts/ 内容 ====="
           ls -lh "$GITHUB_WORKSPACE/artifacts/"
-
           if [ -z "$(ls -A "$GITHUB_WORKSPACE/artifacts")" ]; then
             echo "ERROR: 未找到任何 .deb 产物" >&2
             exit 1
           fi
 
-      # ============================================================
-      # 7. 校验架构
-      # ============================================================
       - name: Verify architecture
         run: |
           set -eux
@@ -162,9 +156,6 @@ jobs:
             dpkg-deb --info "$deb" | grep -E 'Package|Version|Architecture'
           done
 
-      # ============================================================
-      # 8. 上传 artifact
-      # ============================================================
       - name: Upload ${{ matrix.package }} artifact
         uses: actions/upload-artifact@v4
         with:
