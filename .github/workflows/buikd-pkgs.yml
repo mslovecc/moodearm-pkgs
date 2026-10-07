@@ -32,18 +32,17 @@ jobs:
 
       # ---------- 克隆 moOde 官方 pkgbuild 仓库 ----------
       - name: Clone mslovecc/pkgbuild
-        run: |
-          git clone --depth 1 https://github.com/mslovecc/pkgbuild.git pkgbuild
+        run: git clone --depth 1 https://github.com/mslovecc/pkgbuild.git pkgbuild
 
-      # ---------- 安装通用构建工具 ----------
+      # ---------- 通用构建工具 ----------
       - name: Install base build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential fakeroot debhelper dh-make devscripts \
-            pkg-config git wget curl ca-certificates
+            pkg-config git wget curl ca-certificates file
 
-      # ---------- 各包依赖安装 ----------
+      # ---------- 各包依赖 ----------
       - name: Install nqptp dependencies
         if: matrix.package == 'nqptp'
         run: |
@@ -71,33 +70,74 @@ jobs:
           source "$HOME/.cargo/env"
           cargo install cargo-deb --locked
 
-      # ---------- 使用 pkgbuild 脚本构建各包 ----------
+      # ---------- 准备 pkgbuild 环境 ----------
+      - name: Prepare pkgbuild environment
+        run: |
+          set -eux
+          cd pkgbuild
+
+          echo "===== scripts/ 目录 ====="
+          ls -la scripts/
+
+          # 生成 setenv.sh（若不存在）
+          if [ -f scripts/setenv.sh.example ] && [ ! -f scripts/setenv.sh ]; then
+            cp scripts/setenv.sh.example scripts/setenv.sh
+          fi
+          # 若仓库根目录也有 setenv.sh.example，一并处理
+          if [ -f setenv.sh.example ] && [ ! -f setenv.sh ]; then
+            cp setenv.sh.example setenv.sh
+          fi
+
+          # 打印 setenv.sh 内容，方便排查
+          echo "===== setenv.sh 内容 ====="
+          [ -f scripts/setenv.sh ] && cat scripts/setenv.sh || true
+          [ -f setenv.sh ] && cat setenv.sh || true
+
+          chmod +x scripts/*.sh 2>/dev/null || true
+          chmod +x packages/${{ matrix.package }}/build.sh
+          ls -la packages/${{ matrix.package }}/
+
+      # ---------- 构建 ----------
       - name: Build ${{ matrix.package }}
         run: |
           set -eux
-          cd pkgbuild/${{ matrix.package }}
-          # 如果脚本需要 source 环境变量，在此处 source
-          # source ../env.sh
-          chmod +x build.sh
+          cd pkgbuild
+
+          # source 公共函数库与环境变量
+          [ -f scripts/setenv.sh ] && source scripts/setenv.sh || true
+          [ -f setenv.sh ] && source setenv.sh || true
+
+          # 让 build.sh 能找到 scripts/ 下的辅助脚本
+          export PATH="$PWD/scripts:$PATH"
+
+          cd packages/${{ matrix.package }}
           ./build.sh
 
       # ---------- 收集 deb 产物 ----------
       - name: Collect deb artifacts
         run: |
           set -eux
-          mkdir -p artifacts
-          # 根据实际脚本的输出路径调整
-          find pkgbuild -name "*.deb" -path "*/binary/*" -exec cp {} artifacts/ \;
-          # 如果没有输出，尝试其他常见路径
-          if [ -z "$(ls -A artifacts)" ]; then
-            find pkgbuild -name "*.deb" -exec cp {} artifacts/ \;
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+
+          echo "===== 搜索所有 .deb 文件 ====="
+          find "$GITHUB_WORKSPACE/pkgbuild" -type f -name "*.deb" -exec ls -lh {} \;
+
+          # 复制所有 deb 到 artifacts/
+          find "$GITHUB_WORKSPACE/pkgbuild" -type f -name "*.deb" \
+            -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
+
+          echo "===== artifacts/ 内容 ====="
+          ls -lh "$GITHUB_WORKSPACE/artifacts/"
+
+          if [ -z "$(ls -A "$GITHUB_WORKSPACE/artifacts")" ]; then
+            echo "ERROR: 未找到任何 .deb 产物" >&2
+            exit 1
           fi
-          ls -lh artifacts/
 
       - name: Verify architecture
         run: |
           set -eux
-          for deb in artifacts/*.deb; do
+          for deb in "$GITHUB_WORKSPACE/artifacts/"*.deb; do
             echo "=== $deb ==="
             dpkg-deb --info "$deb" | grep -E 'Package|Version|Architecture'
           done
@@ -121,9 +161,7 @@ jobs:
           path: all-debs
 
       - name: List all deb files
-        run: |
-          set -eux
-          find all-debs -type f -name '*.deb' -exec ls -lh {} \;
+        run: find all-debs -type f -name '*.deb' -exec ls -lh {} \;
 
       - name: Determine tag
         id: tag
